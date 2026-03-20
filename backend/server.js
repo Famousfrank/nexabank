@@ -10,9 +10,6 @@ const rateLimit  = require('express-rate-limit');
 const app    = express();
 const server = http.createServer(app);
 
-// ─── Database Connection ──────────────────────────────────────────────────────
-const db = require('./db/pool');
-
 // ─── WebSocket Server ─────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: { origin: process.env.FRONTEND_URL || 'http://localhost:5173', credentials: true }
@@ -49,6 +46,75 @@ io.on('connection', (socket) => {
 // Make io available to routes
 app.set('io', io);
 
+// ─── Database Connection (Lazy Loading) ──────────────────────────────────────
+let db = null;
+let dbConnecting = false;
+
+// Function to initialize database connection
+async function initDatabase() {
+  if (dbConnecting) return;
+  dbConnecting = true;
+  
+  try {
+    console.log('⏳ Attempting to connect to MySQL...');
+    const mysql = require('mysql2/promise');
+    
+    db = await mysql.createPool({
+      host:               process.env.DB_HOST,
+      port:               parseInt(process.env.DB_PORT || '3306'),
+      user:               process.env.DB_USER,
+      password:           process.env.DB_PASSWORD,
+      database:           process.env.DB_NAME,
+      waitForConnections: true,
+      connectionLimit:    10,
+      queueLimit:         0,
+      ssl: { rejectUnauthorized: false },
+      connectTimeout: 30000,
+      enableKeepAlive: true
+    });
+    
+    // Test connection
+    const conn = await db.getConnection();
+    await conn.query('SELECT 1');
+    conn.release();
+    
+    console.log('✅ MySQL connected successfully to Aiven');
+    
+    // Make db available to routes
+    app.set('db', db);
+    
+  } catch (err) {
+    console.error('❌ MySQL connection error:', err.message);
+    console.log('⏳ Will retry in 30 seconds...');
+    
+    // Schedule retry
+    setTimeout(initDatabase, 30000);
+  } finally {
+    dbConnecting = false;
+  }
+}
+
+// ─── Middleware to handle database availability ─────────────────────────────
+app.use((req, res, next) => {
+  // Skip for health check
+  if (req.path === '/health' || req.path === '/') {
+    return next();
+  }
+  
+  // Check if db is connected
+  if (!db) {
+    return res.status(503).json({ 
+      error: 'Database is waking up',
+      message: 'Please wait a few seconds and refresh',
+      status: 'connecting'
+    });
+  }
+  
+  // Attach db to request
+  req.db = db;
+  next();
+});
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({
@@ -64,29 +130,36 @@ app.use(limiter);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: { error: 'Too many attempts, try later' } });
 app.use('/api/auth', authLimiter);
 
-// ─── Database Connection Health Check ─────────────────────────────────────────
-// Middleware to check DB connection before handling requests
-app.use(async (req, res, next) => {
-  // Skip health check endpoint to avoid infinite loop
-  if (req.path === '/health') {
-    return next();
-  }
-  
-  try {
-    // Try to get a connection from the pool
-    const conn = await db.getConnection();
-    conn.release();
-    next();
-  } catch (err) {
-    console.error('❌ Database connection error in middleware:', err.message);
-    res.status(503).json({ 
-      error: 'Database temporarily unavailable',
-      details: 'The database is waking up from sleep mode. Please try again in a few seconds.'
-    });
-  }
+// ─── Routes ───────────────────────────────────────────────────────────────────
+// Health check - always works even without DB
+app.get('/', (_, res) => {
+  res.json({ 
+    status: 'NexaBank API is running',
+    database: db ? 'connected' : 'connecting',
+    timestamp: new Date()
+  });
 });
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
+app.get('/health', (_, res) => {
+  res.json({ 
+    status: 'ok', 
+    database: db ? 'connected' : 'connecting',
+    time: new Date()
+  });
+});
+
+// Only load routes when db is available
+app.use(async (req, res, next) => {
+  if (!db) {
+    return res.status(503).json({ 
+      error: 'Database is waking up',
+      message: 'Please wait a few seconds and refresh'
+    });
+  }
+  next();
+});
+
+// Load routes after DB check
 const adminRoutes = require('./routes/admin');
 app.use('/api/admin', adminRoutes);
 app.use('/api/auth',         require('./routes/auth'));
@@ -96,29 +169,6 @@ app.use('/api/users',        require('./routes/users'));
 app.use('/api/limits',       require('./routes/limits'));
 app.use('/api/loans',        require('./routes/loans'));
 app.use('/api/profile',      require('./routes/profile'));
-
-// Health check - now includes database status
-app.get('/health', async (_, res) => {
-  let dbStatus = 'disconnected';
-  let dbError = null;
-  
-  try {
-    const conn = await db.getConnection();
-    await conn.query('SELECT 1');
-    conn.release();
-    dbStatus = 'connected';
-  } catch (err) {
-    dbStatus = 'error';
-    dbError = err.message;
-  }
-  
-  res.json({ 
-    status: 'ok', 
-    time: new Date(),
-    database: dbStatus,
-    dbError: dbError
-  });
-});
 
 // 404
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
@@ -136,72 +186,25 @@ function pushToUser(userId, event, data) {
 
 module.exports = { pushToUser };
 
-// ─── Server Startup with Database Wait ───────────────────────────────────────
+// ─── Start Server Immediately ───────────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
 
-// Function to wait for database with retries
-async function waitForDatabase(retries = 5, delay = 5000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      console.log(`⏳ Database connection attempt ${i + 1}/${retries}...`);
-      
-      const conn = await db.getConnection();
-      await conn.query('SELECT 1');
-      conn.release();
-      
-      console.log('✅ Database connected successfully');
-      return true;
-    } catch (err) {
-      console.error(`❌ Attempt ${i + 1} failed:`, err.message);
-      
-      if (i < retries - 1) {
-        console.log(`⏳ Waiting ${delay/1000} seconds before retry...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        // Exponential backoff - increase delay each time
-        delay = delay * 1.5;
-      }
-    }
-  }
-  throw new Error('Could not connect to database after multiple attempts');
-}
+server.listen(PORT, () => {
+  console.log(`🚀 NexaBank API server started on http://localhost:${PORT}`);
+  console.log(`⏳ Attempting to connect to MySQL in the background...`);
+  
+  // Start database connection in background
+  initDatabase();
+});
 
-// Start server only after database is connected
-waitForDatabase()
-  .then(() => {
-    server.listen(PORT, () => {
-      console.log(`🚀 NexaBank API running on http://localhost:${PORT}`);
-      console.log(`📊 Health check available at http://localhost:${PORT}/health`);
-    });
-  })
-  .catch(err => {
-    console.error('❌ Failed to start server:', err.message);
-    console.log('💡 The database may be sleeping. Retry in a few seconds...');
-    
-    // Keep trying to connect even after initial failure
-    const keepTrying = setInterval(async () => {
-      try {
-        const conn = await db.getConnection();
-        await conn.query('SELECT 1');
-        conn.release();
-        
-        console.log('✅ Database finally connected! Starting server...');
-        clearInterval(keepTrying);
-        
-        server.listen(PORT, () => {
-          console.log(`🚀 NexaBank API running on http://localhost:${PORT}`);
-          console.log(`📊 Health check available at http://localhost:${PORT}/health`);
-        });
-      } catch (err) {
-        console.log('⏳ Still waiting for database to wake up...');
-      }
-    }, 10000); // Check every 10 seconds
-  });
-
-// Handle graceful shutdown
+// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('🛑 SIGTERM received, closing server...');
   server.close(() => {
     console.log('✅ Server closed');
+    if (db) {
+      db.end().then(() => console.log('✅ Database connection closed'));
+    }
     process.exit(0);
   });
 });
@@ -210,6 +213,9 @@ process.on('SIGINT', () => {
   console.log('🛑 SIGINT received, closing server...');
   server.close(() => {
     console.log('✅ Server closed');
+    if (db) {
+      db.end().then(() => console.log('✅ Database connection closed'));
+    }
     process.exit(0);
   });
 });
