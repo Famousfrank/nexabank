@@ -170,18 +170,7 @@ app.get('/health', (_, res) => {
   });
 });
 
-// Only load routes when db is available
-app.use(async (req, res, next) => {
-  if (!db) {
-    return res.status(503).json({ 
-      error: 'Database is waking up',
-      message: 'Please wait a few seconds and refresh'
-    });
-  }
-  next();
-});
-
-// Load routes after DB check
+// Load routes immediately (don't wait for DB)
 const adminRoutes = require('./routes/admin');
 app.use('/api/admin', adminRoutes);
 app.use('/api/auth',         require('./routes/auth'));
