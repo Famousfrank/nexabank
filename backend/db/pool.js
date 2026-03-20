@@ -11,15 +11,12 @@ const pool = mysql.createPool({
   queueLimit:         0,
   timezone:           'Z',
   dateStrings:        false,
-  ssl: {
-    rejectUnauthorized: false
-  },
-  // Add these connection timeout settings
-  connectTimeout: 60000, // 60 seconds
-  acquireTimeout: 60000, // 60 seconds
-  timeout: 60000, // 60 seconds
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 10000 // 10 seconds
+  // Only add SSL if using Aiven (production) or if SSL env var is true
+  ...(process.env.DB_SSL === 'true' ? {
+    ssl: {
+      rejectUnauthorized: false
+    }
+  } : {})
 });
 
 // Add connection error handling
@@ -38,7 +35,7 @@ async function testConnection(retries = 3) {
   for (let i = 0; i < retries; i++) {
     try {
       const conn = await pool.getConnection();
-      console.log('✅ MySQL connected successfully to Aiven');
+      console.log('✅ MySQL connected successfully');
       conn.release();
       return true;
     } catch (err) {
@@ -52,7 +49,7 @@ async function testConnection(retries = 3) {
   throw new Error('Failed to connect to MySQL after multiple retries');
 }
 
-// Test connection immediately
+// Test connection immediately (but don't block startup)
 testConnection().catch(err => {
   console.error('❌ Fatal: Could not connect to MySQL:', err.message);
 });
