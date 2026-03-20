@@ -6,6 +6,8 @@ const http       = require('http');
 const { Server } = require('socket.io');
 const jwt        = require('jsonwebtoken');
 const rateLimit  = require('express-rate-limit');
+const fs         = require('fs');
+const path       = require('path');
 
 const app    = express();
 const server = http.createServer(app);
@@ -117,6 +119,7 @@ app.use((req, res, next) => {
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
+
 // CORS configuration
 const allowedOrigins = [
   'https://nexabank-frontend.onrender.com',
@@ -170,19 +173,131 @@ app.get('/health', (_, res) => {
   });
 });
 
-// Load routes immediately (don't wait for DB)
-const adminRoutes = require('./routes/admin');
-app.use('/api/admin', adminRoutes);
-app.use('/api/auth',         require('./routes/auth'));
-app.use('/api/accounts',     require('./routes/accounts'));
-app.use('/api/transactions', require('./routes/transactions'));
-app.use('/api/users',        require('./routes/users'));
-app.use('/api/limits',       require('./routes/limits'));
-app.use('/api/loans',        require('./routes/loans'));
-app.use('/api/profile',      require('./routes/profile'));
+// Debug: List all files in routes directory
+app.get('/api/debug/files', (req, res) => {
+  try {
+    const routesDir = path.join(__dirname, 'routes');
+    const files = fs.readdirSync(routesDir);
+    res.json({ 
+      routesDirectory: routesDir,
+      files: files,
+      exists: fs.existsSync(routesDir)
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
 
-// 404
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
+// Debug: List all registered routes
+app.get('/api/debug/routes', (req, res) => {
+  const routes = [];
+  
+  app._router.stack.forEach(layer => {
+    if (layer.route) {
+      // Route layer
+      const methods = Object.keys(layer.route.methods).join(', ').toUpperCase();
+      routes.push({
+        path: layer.route.path,
+        methods: methods
+      });
+    } else if (layer.name === 'router' && layer.handle.stack) {
+      // Router layer - get the base path
+      let basePath = '';
+      if (layer.regexp) {
+        basePath = layer.regexp.source
+          .replace('\\/?(?=\\/|$)', '')
+          .replace(/\\\//g, '/')
+          .replace(/\^/g, '')
+          .replace(/\$/g, '')
+          .replace(/\(\?:\(\[\^\\\/\]\+\?\)\)/g, ':param');
+      }
+      
+      layer.handle.stack.forEach(handler => {
+        if (handler.route) {
+          const methods = Object.keys(handler.route.methods).join(', ').toUpperCase();
+          routes.push({
+            path: basePath + handler.route.path,
+            methods: methods
+          });
+        }
+      });
+    }
+  });
+  
+  res.json({ 
+    routes: routes.sort((a, b) => a.path.localeCompare(b.path)),
+    total: routes.length,
+    dbConnected: db ? 'yes' : 'no'
+  });
+});
+
+// Load routes with error handling
+console.log('\n🔍 Loading routes from:', path.join(__dirname, 'routes'));
+
+// Check if routes directory exists
+try {
+  const routesDir = path.join(__dirname, 'routes');
+  if (fs.existsSync(routesDir)) {
+    console.log('✅ Routes directory found');
+    const files = fs.readdirSync(routesDir);
+    console.log('📁 Available route files:', files);
+  } else {
+    console.log('❌ Routes directory NOT found at:', routesDir);
+  }
+} catch (err) {
+  console.error('❌ Error checking routes directory:', err.message);
+}
+
+// Load auth routes first (most important)
+try {
+  console.log('⏳ Attempting to load auth routes...');
+  const authPath = path.join(__dirname, 'routes', 'auth.js');
+  console.log('📄 Auth path:', authPath);
+  
+  if (fs.existsSync(authPath)) {
+    const authRoutes = require(authPath);
+    console.log('✅ Auth routes loaded successfully');
+    console.log('📦 Auth routes type:', typeof authRoutes);
+    app.use('/api/auth', authRoutes);
+  } else {
+    console.log('❌ Auth file not found at:', authPath);
+  }
+} catch (err) {
+  console.error('❌ Failed to load auth routes:', err.message);
+  console.error(err.stack);
+}
+
+// Load other routes
+const routeFiles = [
+  { name: 'admin', path: 'admin.js' },
+  { name: 'accounts', path: 'accounts.js' },
+  { name: 'transactions', path: 'transactions.js' },
+  { name: 'users', path: 'users.js' },
+  { name: 'limits', path: 'limits.js' },
+  { name: 'loans', path: 'loans.js' },
+  { name: 'profile', path: 'profile.js' }
+];
+
+routeFiles.forEach(route => {
+  try {
+    const routePath = path.join(__dirname, 'routes', route.path);
+    if (fs.existsSync(routePath)) {
+      const routeModule = require(routePath);
+      console.log(`✅ ${route.name} routes loaded`);
+      app.use(`/api/${route.name}`, routeModule);
+    } else {
+      console.log(`❌ ${route.name} file not found:`, routePath);
+    }
+  } catch (err) {
+    console.error(`❌ Failed to load ${route.name} routes:`, err.message);
+  }
+});
+
+// 404 handler
+app.use((req, res) => {
+  console.log('❌ 404 - Not Found:', req.method, req.url);
+  res.status(404).json({ error: 'Route not found' });
+});
 
 // Error handler
 app.use((err, req, res, next) => {
@@ -201,8 +316,12 @@ module.exports = { pushToUser };
 const PORT = process.env.PORT || 4000;
 
 server.listen(PORT, () => {
-  console.log(`🚀 NexaBank API server started on http://localhost:${PORT}`);
+  console.log(`\n🚀 NexaBank API server started on http://localhost:${PORT}`);
   console.log(`⏳ Attempting to connect to MySQL in the background...`);
+  console.log(`📊 Debug endpoints:`);
+  console.log(`   - GET /api/debug/files`);
+  console.log(`   - GET /api/debug/routes`);
+  console.log(`   - GET /health\n`);
   
   // Start database connection in background
   initDatabase();
@@ -213,7 +332,7 @@ process.on('SIGTERM', () => {
   console.log('🛑 SIGTERM received, closing server...');
   server.close(() => {
     console.log('✅ Server closed');
-    if (db) {
+    if (db && db.end) {
       db.end().then(() => console.log('✅ Database connection closed'));
     }
     process.exit(0);
@@ -224,7 +343,7 @@ process.on('SIGINT', () => {
   console.log('🛑 SIGINT received, closing server...');
   server.close(() => {
     console.log('✅ Server closed');
-    if (db) {
+    if (db && db.end) {
       db.end().then(() => console.log('✅ Database connection closed'));
     }
     process.exit(0);
