@@ -25,6 +25,7 @@ function maskCard(n) {
 // Step 1: validate details, send OTP to email
 router.post('/signup/init', async (req, res) => {
   try {
+    console.log('Signup init payload:', req.body);
     const { full_name, email, phone, password } = req.body;
 
     if (!full_name || !email || !phone || !password)
@@ -43,11 +44,12 @@ router.post('/signup/init', async (req, res) => {
     // Generate OTP
     const otp  = generateOTP();
     const exp  = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    console.log("OTP for signup:", otp); // Log OTP for testing (remove in production)
 
     // Store everything in a signed base64 token - no DB needed before user exists
     const pendingToken = Buffer.from(JSON.stringify({ full_name, email, phone, hash, otp, exp: exp.getTime() })).toString('base64');
 
-    await sendOTPEmail(email, otp, 'signup');
+    // await sendOTPEmail(email, otp, 'signup');
 
     return res.json({ pendingToken, message: 'OTP sent to your email' });
   } catch (err) {
