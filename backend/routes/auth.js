@@ -161,69 +161,41 @@ router.post('/login/init', async (req, res) => {
       [user.id, otp, exp]
     );
 
+    // Send OTP email - this will log to console if SMTP fails
     await sendOTPEmail(email, otp, 'login');
 
     return res.json({ userId: user.id, message: 'OTP sent to your email' });
   } catch (err) {
-    console.error(err);
+    console.error('Login init error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// ─── POST /auth/login/verify ──────────────────────────────────────────────────
-// Step 2: verify OTP → issue tokens
-router.post('/login/verify', async (req, res) => {
+// ─── POST /auth/login/init ────────────────────────────────────────────────────
+// Step 1: validate credentials → send login OTP
+router.post('/login/init', async (req, res) => {
   try {
-    const { userId, otp } = req.body;
-    if (!userId || !otp) return res.status(400).json({ error: 'Missing fields' });
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
 
-    const [rows] = await db.query(
-      `SELECT * FROM otp_codes WHERE user_id = ? AND code = ? AND purpose = 'login' AND used = 0 AND expires_at > NOW()
-       ORDER BY created_at DESC LIMIT 1`,
-      [userId, otp]
-    );
+    const [rows] = await db.query('SELECT * FROM users WHERE email = ? AND is_active = 1', [email]);
+    if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
 
-    if (rows.length === 0) return res.status(400).json({ error: 'Invalid or expired OTP' });
-    await db.query('UPDATE otp_codes SET used = 1 WHERE id = ?', [rows[0].id]);
+    const user = rows[0];
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    const [users] = await db.query('SELECT id, full_name, email, phone, avatar FROM users WHERE id = ?', [userId]);
-    const user = users[0];
-
-    // Auto-create default accounts if user has none (e.g. after schema reset)
-    const [existingAccounts] = await db.query('SELECT id FROM accounts WHERE user_id = ? LIMIT 1', [user.id]);
-    if (existingAccounts.length === 0) {
-      const accountDefs = [
-        { label: 'Checking', type: 'checking', color: '#c8102e' },
-        { label: 'Savings',  type: 'savings',  color: '#1a7f4b' },
-        { label: 'Credit',   type: 'credit',   color: '#e07b00' },
-      ];
-      for (const acc of accountDefs) {
-        const accId  = crypto.randomUUID();
-        const cardNo = randomCardNumber();
-        await db.query(
-          'INSERT INTO accounts (id, user_id, label, type, card_number, balance, card_color) VALUES (?,?,?,?,?,0,?)',
-          [accId, user.id, acc.label, acc.type, cardNo, acc.color]
-        );
-      }
-      await db.query(
-        "INSERT INTO notifications (user_id, icon, message) VALUES (?, '\uD83C\uDFE6', ?)",
-        [user.id, `Welcome back, ${user.full_name.split(' ')[0]}! Your accounts have been restored.`]
-      );
-    }
-
-    const accessToken  = signAccess({ id: user.id, email: user.email });
-    const refreshToken = signRefresh({ id: user.id });
-    const rtExp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const otp = generateOTP();
+    const exp = new Date(Date.now() + 10 * 60 * 1000);
     await db.query(
-      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?,?,?)',
-      [user.id, refreshToken, rtExp]
+      `INSERT INTO otp_codes (user_id, code, purpose, expires_at) VALUES (?, ?, 'login', ?)`,
+      [user.id, otp, exp]
     );
 
-    return res.json({
-      accessToken,
-      refreshToken,
-      user: { id: user.id, full_name: user.full_name, email: user.email, phone: user.phone, avatar: user.avatar },
-    });
+    // UNCOMMENT THIS LINE:
+    await sendOTPEmail(email, otp, 'login');
+
+    return res.json({ userId: user.id, message: 'OTP sent to your email' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

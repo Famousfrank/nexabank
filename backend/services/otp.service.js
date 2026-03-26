@@ -1,21 +1,30 @@
 const nodemailer = require('nodemailer');
 
+// Configure transporter with timeouts to prevent hanging
 const transporter = nodemailer.createTransport({
-  host:   process.env.SMTP_HOST || 'smtp.gmail.com',
-  port:   parseInt(process.env.SMTP_PORT || '587'),
-  secure: false,
-  family: 4,
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: false, // true for 465, false for other ports
+  family: 4, // Use IPv4 only
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
-  tls: { rejectUnauthorized: false },
+  tls: { 
+    rejectUnauthorized: false 
+  },
+  // Timeout settings to prevent hanging
+  connectionTimeout: 10000,  // 10 seconds to connect
+  greetingTimeout: 10000,    // 10 seconds for greeting
+  socketTimeout: 10000       // 10 seconds for socket activity
 });
 
+// Function to generate a 6-digit OTP
 function generateOTP() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
+// Function to send OTP email
 async function sendOTPEmail(to, otp, purpose = 'login') {
   const subjects = {
     signup: '🏦 NexaBank – Verify your account',
@@ -39,17 +48,29 @@ async function sendOTPEmail(to, otp, purpose = 'login') {
       </div>
     </div>`;
 
-  if (!process.env.SMTP_USER) {
-    console.log(`\n📧 OTP for ${to}: \x1b[32m${otp}\x1b[0m  (purpose: ${purpose})\n`);
-    return;
+  
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.log(`\n📧 =========================================`);
+    console.log(`📧 OTP for ${to} (${purpose}): \x1b[32m${otp}\x1b[0m`);
+    console.log(`📧 =========================================\n`);
+    return { success: true, simulated: true };
   }
 
-  await transporter.sendMail({
-    from:    `"NexaBank" <${process.env.SMTP_USER}>`,
-    to,
-    subject: subjects[purpose] || subjects.login,
-    html,
-  });
+  try {
+    // Send email with timeout
+    const info = await transporter.sendMail({
+      from: `"NexaBank" <${process.env.SMTP_USER}>`,
+      to,
+      subject: subjects[purpose] || subjects.login,
+      html,
+    });
+    console.log(`✅ OTP email sent to ${to} (${purpose}) - Message ID: ${info.messageId}`);
+    return { success: true, messageId: info.messageId };
+  } catch (err) {
+    console.error(`❌ Failed to send OTP email to ${to}:`, err.message);
+    
+    return { success: false, error: err.message };
+  }
 }
 
 module.exports = { generateOTP, sendOTPEmail, transporter };
