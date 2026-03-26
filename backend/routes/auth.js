@@ -161,7 +161,7 @@ router.post('/login/init', async (req, res) => {
       [user.id, otp, exp]
     );
 
-    // await sendOTPEmail(email, otp, 'login');
+    await sendOTPEmail(email, otp, 'login');
 
     return res.json({ userId: user.id, message: 'OTP sent to your email' });
   } catch (err) {
@@ -171,6 +171,7 @@ router.post('/login/init', async (req, res) => {
 });
 
 // ─── POST /auth/login/verify ──────────────────────────────────────────────────
+// Step 2: verify OTP → issue tokens
 router.post('/login/verify', async (req, res) => {
   try {
     const { userId, otp } = req.body;
@@ -213,7 +214,6 @@ router.post('/login/verify', async (req, res) => {
     const accessToken  = signAccess({ id: user.id, email: user.email });
     const refreshToken = signRefresh({ id: user.id });
     const rtExp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    console.log("OTP for signup:", otp); // Log OTP for testing (remove in production)
     await db.query(
       'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?,?,?)',
       [user.id, refreshToken, rtExp]
