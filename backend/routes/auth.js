@@ -11,7 +11,6 @@ function initials(name) {
 }
 
 function randomCardNumber() {
-  // First digit 1-9, rest 0-9, giving a clean 12-digit account number with no leading zero
   const first = String(Math.floor(Math.random() * 9) + 1);
   const rest  = Array.from({ length: 11 }, () => Math.floor(Math.random() * 10)).join('');
   return first + rest;
@@ -22,7 +21,6 @@ function maskCard(n) {
 }
 
 // ─── POST /auth/signup/init ───────────────────────────────────────────────────
-// Step 1: validate details, send OTP to email
 router.post('/signup/init', async (req, res) => {
   try {
     console.log('Signup init payload:', req.body);
@@ -38,18 +36,12 @@ router.post('/signup/init', async (req, res) => {
     if (existing.length > 0)
       return res.status(409).json({ error: 'Email already registered' });
 
-    // Hash password now so we don't store plaintext anywhere
     const hash = await bcrypt.hash(password, 12);
-
-    // Generate OTP
     const otp  = generateOTP();
-    const exp  = new Date(Date.now() + 10 * 60 * 1000); // 10 min
-    console.log("OTP for signup:", otp); // Log OTP for testing (remove in production)
+    const exp  = new Date(Date.now() + 10 * 60 * 1000);
+    console.log("OTP for signup:", otp);
 
-    // Store everything in a signed base64 token - no DB needed before user exists
     const pendingToken = Buffer.from(JSON.stringify({ full_name, email, phone, hash, otp, exp: exp.getTime() })).toString('base64');
-
-    // await sendOTPEmail(email, otp, 'signup');
 
     return res.json({ pendingToken, message: 'OTP sent to your email' });
   } catch (err) {
@@ -59,7 +51,6 @@ router.post('/signup/init', async (req, res) => {
 });
 
 // ─── POST /auth/signup/verify ─────────────────────────────────────────────────
-// Step 2: verify OTP → create user + default accounts
 router.post('/signup/verify', async (req, res) => {
   try {
     const { pendingToken, otp } = req.body;
@@ -67,7 +58,6 @@ router.post('/signup/verify', async (req, res) => {
     if (!pendingToken || !otp)
       return res.status(400).json({ error: 'Missing fields' });
 
-    // Decode pending data (contains OTP + expiry)
     let pending;
     try {
       pending = JSON.parse(Buffer.from(pendingToken, 'base64').toString('utf8'));
@@ -77,25 +67,21 @@ router.post('/signup/verify', async (req, res) => {
 
     const { full_name, email, phone, hash, otp: storedOtp, exp } = pending;
 
-    // Verify OTP and expiry
     if (storedOtp !== otp)
       return res.status(400).json({ error: 'Invalid OTP code' });
 
     if (Date.now() > exp)
       return res.status(400).json({ error: 'OTP has expired, please try again' });
 
-    // Double-check email still free
     const [dup] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
     if (dup.length > 0) return res.status(409).json({ error: 'Email already registered' });
 
-    // Create user
     const userId = crypto.randomUUID();
     await db.query(
       `INSERT INTO users (id, full_name, email, phone, password_hash, avatar, is_verified) VALUES (?,?,?,?,?,?,1)`,
       [userId, full_name, email, phone, hash, initials(full_name)]
     );
 
-    // Create 3 default accounts
     const accountDefs = [
       { label: 'Checking', type: 'checking', balance: 0, color: '#c8102e' },
       { label: 'Savings',  type: 'savings',  balance: 0, color: '#1a7f4b' },
@@ -113,13 +99,11 @@ router.post('/signup/verify', async (req, res) => {
       createdAccounts.push({ id: accId, label: acc.label, type: acc.type, card_number: maskCard(cardNo), balance: acc.balance, card_color: acc.color });
     }
 
-    // Create a welcome notification
     await db.query(
       `INSERT INTO notifications (user_id, icon, message) VALUES (?, '🎉', ?)`,
       [userId, `Welcome to NexaBank, ${full_name.split(' ')[0]}! Your accounts are ready.`]
     );
 
-    // Issue tokens
     const accessToken  = signAccess({ id: userId, email });
     const refreshToken = signRefresh({ id: userId });
     const rtExp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -141,7 +125,6 @@ router.post('/signup/verify', async (req, res) => {
 });
 
 // ─── POST /auth/login/init ────────────────────────────────────────────────────
-// Step 1: validate credentials → send login OTP
 router.post('/login/init', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -161,12 +144,76 @@ router.post('/login/init', async (req, res) => {
       [user.id, otp, exp]
     );
 
-    // Send OTP email
     await sendOTPEmail(email, otp, 'login');
 
     return res.json({ userId: user.id, message: 'OTP sent to your email' });
   } catch (err) {
     console.error('Login init error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── POST /auth/login/verify ────────────────────────────────────────────────────
+// Step 2: verify OTP and complete login
+router.post('/login/verify', async (req, res) => {
+  try {
+    const { userId, otp } = req.body;
+    
+    if (!userId || !otp) {
+      return res.status(400).json({ error: 'User ID and OTP code required' });
+    }
+
+    const [otpRows] = await db.query(
+      'SELECT * FROM otp_codes WHERE user_id = ? AND code = ? AND purpose = "login" AND expires_at > NOW()',
+      [userId, otp]
+    );
+
+    if (otpRows.length === 0) {
+      return res.status(400).json({ error: 'Invalid or expired OTP code' });
+    }
+
+    await db.query('DELETE FROM otp_codes WHERE id = ?', [otpRows[0].id]);
+
+    const [users] = await db.query('SELECT id, full_name, email, phone, avatar FROM users WHERE id = ? AND is_active = 1', [userId]);
+    
+    if (users.length === 0) {
+      return res.status(401).json({ error: 'User not found or inactive' });
+    }
+
+    const user = users[0];
+
+    const accessToken = signAccess({ id: user.id, email: user.email });
+    const refreshToken = signRefresh({ id: user.id });
+    const rtExp = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    
+    await db.query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?,?,?)',
+      [user.id, refreshToken, rtExp]
+    );
+
+    const [accounts] = await db.query(
+      'SELECT id, label, type, card_number, balance, card_color FROM accounts WHERE user_id = ?',
+      [user.id]
+    );
+
+    return res.json({
+      accessToken,
+      refreshToken,
+      user: {
+        id: user.id,
+        full_name: user.full_name,
+        email: user.email,
+        phone: user.phone,
+        avatar: user.avatar
+      },
+      accounts: accounts.map(acc => ({
+        ...acc,
+        card_number: maskCard(acc.card_number)
+      }))
+    });
+    
+  } catch (err) {
+    console.error('Login verify error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -220,7 +267,8 @@ router.post('/logout-all', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-// Add this new endpoint for admin login (no OTP)
+
+// Admin login endpoint
 router.post('/admin-login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -233,13 +281,11 @@ router.post('/admin-login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Check if admin (by email or add is_admin column)
     const adminEmails = ['admin@nexabank.com', 'franknkem0049@gmail.com'];
     if (!adminEmails.includes(email)) {
       return res.status(403).json({ error: 'Access denied. Admin only.' });
     }
 
-    // Auto-create default accounts if user has none
     const [existingAccounts] = await db.query('SELECT id FROM accounts WHERE user_id = ? LIMIT 1', [user.id]);
     if (existingAccounts.length === 0) {
       const accountDefs = [
