@@ -48,15 +48,31 @@ async function sendOTPEmail(to, otp, purpose = 'login') {
       </div>
     </div>`;
 
+  // Log SMTP configuration (without password)
+  console.log('📧 SMTP Configuration:', {
+    host: process.env.SMTP_HOST,
+    port: process.env.SMTP_PORT,
+    user: process.env.SMTP_USER ? process.env.SMTP_USER.substring(0, 5) + '...' : 'NOT SET',
+    hasPass: !!process.env.SMTP_PASS
+  });
   
+  // Check if SMTP credentials are missing
   if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
     console.log(`\n📧 =========================================`);
+    console.log(`⚠️ SMTP credentials missing!`);
     console.log(`📧 OTP for ${to} (${purpose}): \x1b[32m${otp}\x1b[0m`);
+    console.log(`📧 Add SMTP_USER and SMTP_PASS to environment variables`);
     console.log(`📧 =========================================\n`);
-    return { success: true, simulated: true };
+    return { success: true, simulated: true, otp: otp };
   }
 
   try {
+    console.log(`📧 Attempting to send OTP email to ${to}...`);
+    
+    // Verify transporter configuration
+    await transporter.verify();
+    console.log('✅ SMTP transporter verified successfully');
+    
     // Send email with timeout
     const info = await transporter.sendMail({
       from: `"NexaBank" <${process.env.SMTP_USER}>`,
@@ -64,12 +80,20 @@ async function sendOTPEmail(to, otp, purpose = 'login') {
       subject: subjects[purpose] || subjects.login,
       html,
     });
+    
     console.log(`✅ OTP email sent to ${to} (${purpose}) - Message ID: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
+    
   } catch (err) {
     console.error(`❌ Failed to send OTP email to ${to}:`, err.message);
+    console.error(`❌ Error details:`, err);
     
-    return { success: false, error: err.message };
+    // Log the OTP to console as fallback
+    console.log(`\n📧 =========================================`);
+    console.log(`⚠️ Email failed - OTP for ${to} (${purpose}): \x1b[32m${otp}\x1b[0m`);
+    console.log(`📧 =========================================\n`);
+    
+    return { success: false, error: err.message, otp: otp };
   }
 }
 

@@ -322,4 +322,15 @@ router.post('/admin-login', async (req, res) => {
   }
 });
 
+
+router.get('/test-email', async (req, res) => {
+  try {
+    const testResult = await sendOTPEmail('franknkem0049@gmail.com', '123456', 'test');
+    res.json({ success: true, result: testResult });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+
