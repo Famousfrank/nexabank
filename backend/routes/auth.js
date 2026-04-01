@@ -161,43 +161,12 @@ router.post('/login/init', async (req, res) => {
       [user.id, otp, exp]
     );
 
-    // Send OTP email - this will log to console if SMTP fails
+    // Send OTP email
     await sendOTPEmail(email, otp, 'login');
 
     return res.json({ userId: user.id, message: 'OTP sent to your email' });
   } catch (err) {
     console.error('Login init error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// ─── POST /auth/login/init ────────────────────────────────────────────────────
-// Step 1: validate credentials → send login OTP
-router.post('/login/init', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-
-    const [rows] = await db.query('SELECT * FROM users WHERE email = ? AND is_active = 1', [email]);
-    if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const user = rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-
-    const otp = generateOTP();
-    const exp = new Date(Date.now() + 10 * 60 * 1000);
-    await db.query(
-      `INSERT INTO otp_codes (user_id, code, purpose, expires_at) VALUES (?, ?, 'login', ?)`,
-      [user.id, otp, exp]
-    );
-
-    // UNCOMMENT THIS LINE:
-    await sendOTPEmail(email, otp, 'login');
-
-    return res.json({ userId: user.id, message: 'OTP sent to your email' });
-  } catch (err) {
-    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
