@@ -147,3 +147,12 @@ app.listen(PORT, () => {
   console.log(`🌐 CORS allowed origins:`, allowedOrigins);
   console.log();
 });
+
+app.get('/api/db-test', async (req, res) => {
+  try {
+    const [rows] = await db.query('SELECT COUNT(*) as count FROM users');
+    res.json({ success: true, userCount: rows[0].count });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
